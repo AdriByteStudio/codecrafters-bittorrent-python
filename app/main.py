@@ -169,7 +169,54 @@ def perform_handshake(host, port, info_hash, reserved=b"\x00" * 8):
         sock.sendall(handshake)
         response = recv_exact(sock, 68)
 
-    return response[48:68]
+    return response
+
+
+def send_extension_handshake(sock, ut_metadata_id):
+    # Extension handshake payload: extension message id (0) + bencoded dict
+    payload = b"\x00" + bencode({
+        b"m": {b"ut_metadata": ut_metadata_id},
+    })
+    message = len(payload).to_bytes(4, "big") + b"\x14" + payload  # id 20
+    sock.sendall(message)
+
+
+def magnet_handshake_with_peer(host, port, info_hash):
+    reserved = b"\x00\x00\x00\x00\x00\x10\x00\x00"
+    handshake = (
+        b"\x13" + b"BitTorrent protocol" + reserved
+        + info_hash + os.urandom(20)
+    )
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.sendall(handshake)
+        response = recv_exact(sock, 68)
+        received_peer_id = response[48:68]
+
+        # If the peer supports extensions (20th reserved bit set), send the
+        # extension handshake and wait for the response
+        peer_reserved = response[20:28]
+        if peer_reserved[5] & 0x10:
+            # Wait for bitfield message (id 5)
+            while True:
+                msg = recv_message(sock)
+                if msg is None:
+                    continue
+                msg_id, _ = msg
+                if msg_id == 5:
+                    break
+            # Send extension handshake (ut_metadata id 1)
+            send_extension_handshake(sock, 1)
+            # Wait for extension handshake response (id 20, ext id 0)
+            while True:
+                msg = recv_message(sock)
+                if msg is None:
+                    continue
+                msg_id, payload = msg
+                if msg_id == 20 and payload[0] == 0:
+                    break
+
+    return received_peer_id
 
 
 def main():
@@ -247,7 +294,8 @@ def main():
         host, port = sys.argv[3].rsplit(":", 1)
         port = int(port)
 
-        received_peer_id = perform_handshake(host, port, info_hash)
+        response = perform_handshake(host, port, info_hash)
+        received_peer_id = response[48:68]
         print(f"Peer ID: {received_peer_id.hex()}")
     elif command == "magnet_handshake":
         magnet_link = sys.argv[2]
@@ -275,7 +323,7 @@ def main():
             host = ".".join(str(b) for b in peers[i:i+4])
             port = int.from_bytes(peers[i+4:i+6], "big")
             try:
-                received_peer_id = perform_handshake(host, port, info_hash, reserved)
+                received_peer_id = magnet_handshake_with_peer(host, port, info_hash)
                 break
             except Exception:
                 continue
