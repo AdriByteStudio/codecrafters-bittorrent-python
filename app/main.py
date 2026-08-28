@@ -98,7 +98,7 @@ def download_piece_from_peer(host, port, info_hash, piece_index, piece_length):
     handshake = (
         b"\x13"  # length of protocol string (19)
         + b"BitTorrent protocol"
-        + b"\x00" * 8  # reserved bytes
+        + b"\x00\x00\x00\x00\x00\x10\x00\x00"  # reserved bytes (extension support)
         + info_hash
         + os.urandom(20)  # peer id
     )
@@ -154,6 +154,22 @@ def download_piece_from_peer(host, port, info_hash, piece_index, piece_length):
                 blocks[begin] = payload[8:]
 
     return b"".join(blocks[begin] for begin in sorted(blocks))
+
+
+def perform_handshake(host, port, info_hash, reserved=b"\x00" * 8):
+    handshake = (
+        b"\x13"  # length of protocol string (19)
+        + b"BitTorrent protocol"
+        + reserved
+        + info_hash
+        + os.urandom(20)  # peer id
+    )
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.sendall(handshake)
+        response = recv_exact(sock, 68)
+
+    return response[48:68]
 
 
 def main():
@@ -231,24 +247,42 @@ def main():
         host, port = sys.argv[3].rsplit(":", 1)
         port = int(port)
 
-        handshake = (
-            b"\x13"  # length of protocol string (19)
-            + b"BitTorrent protocol"
-            + b"\x00" * 8  # reserved bytes
-            + info_hash
-            + os.urandom(20)  # peer id
+        received_peer_id = perform_handshake(host, port, info_hash)
+        print(f"Peer ID: {received_peer_id.hex()}")
+    elif command == "magnet_handshake":
+        magnet_link = sys.argv[2]
+        params = parse_qs(urlparse(magnet_link).query)
+        info_hash = bytes.fromhex(params["xt"][0].split(":")[-1])
+        tracker_url = params["tr"][0]
+
+        # Tracker GET request (left is unknown for magnet links, use placeholder)
+        url = (
+            f"{tracker_url}?info_hash={quote_from_bytes(info_hash, safe='')}"
+            f"&peer_id={quote_from_bytes(os.urandom(20), safe='')}"
+            f"&port=6881&uploaded=0&downloaded=0&left=1&compact=1"
         )
+        response = requests.get(url)
+        response.raise_for_status()
+        tracker_response = decode_bencode(response.content)
+        peers = tracker_response[b'peers']
 
-        with socket.create_connection((host, port), timeout=10) as sock:
-            sock.sendall(handshake)
-            response = b""
-            while len(response) < 68:
-                chunk = sock.recv(68 - len(response))
-                if not chunk:
-                    break
-                response += chunk
+        # Reserved bytes with the 20th bit (from the right, 0-indexed) set,
+        # signalling support for the extension protocol
+        reserved = b"\x00\x00\x00\x00\x00\x10\x00\x00"
 
-        received_peer_id = response[48:68]
+        received_peer_id = None
+        for i in range(0, len(peers), 6):
+            host = ".".join(str(b) for b in peers[i:i+4])
+            port = int.from_bytes(peers[i+4:i+6], "big")
+            try:
+                received_peer_id = perform_handshake(host, port, info_hash, reserved)
+                break
+            except Exception:
+                continue
+
+        if received_peer_id is None:
+            raise RuntimeError("Failed to handshake with any peer")
+
         print(f"Peer ID: {received_peer_id.hex()}")
     elif command == "download_piece":
         output_path = sys.argv[3]
