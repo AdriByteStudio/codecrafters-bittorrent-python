@@ -9,18 +9,36 @@ import sys
 # - decode_bencode(b"5:hello") -> b"hello"
 # - decode_bencode(b"10:hello12345") -> b"hello12345"
 def decode_bencode(bencoded_value):
-    if chr(bencoded_value[0]).isdigit():
-        first_colon_index = bencoded_value.find(b":")
-        if first_colon_index == -1:
+    value, _ = _decode_bencode(bencoded_value, 0)
+    return value
+
+
+def _decode_bencode(data, index):
+    if chr(data[index]).isdigit():
+        # string: <length>:<bytes>
+        colon_index = data.find(b":", index)
+        if colon_index == -1:
             raise ValueError("Invalid encoded value")
-        return bencoded_value[first_colon_index+1:]
-    elif bencoded_value[0:1] == b"i":
-        end_index = bencoded_value.find(b"e")
+        length = int(data[index:colon_index])
+        start = colon_index + 1
+        end = start + length
+        return data[start:end], end
+    elif data[index:index+1] == b"i":
+        # integer: i<number>e
+        end_index = data.find(b"e", index)
         if end_index == -1:
             raise ValueError("Invalid encoded value")
-        return int(bencoded_value[1:end_index])
+        return int(data[index+1:end_index]), end_index + 1
+    elif data[index:index+1] == b"l":
+        # list: l<bencoded_elements>e
+        index += 1
+        result = []
+        while data[index:index+1] != b"e":
+            value, index = _decode_bencode(data, index)
+            result.append(value)
+        return result, index + 1
     else:
-        raise NotImplementedError("Only strings and integers are supported at the moment")
+        raise NotImplementedError("Only strings, integers, and lists are supported at the moment")
 
 
 def main():
