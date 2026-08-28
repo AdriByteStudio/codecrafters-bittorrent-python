@@ -3,7 +3,7 @@ import json
 import os
 import socket
 import sys
-from urllib.parse import quote_from_bytes
+from urllib.parse import parse_qs, quote_from_bytes, urlparse
 
 import requests
 
@@ -375,6 +375,13 @@ def main():
             f.write(file_data)
 
         print(f"Downloaded {torrent_file} to {output_path}")
+    elif command == "magnet_parse":
+        magnet_link = sys.argv[2]
+        params = parse_qs(urlparse(magnet_link).query)
+        info_hash = params["xt"][0].split(":")[-1]  # urn:btih:<hex>
+        tracker_url = params["tr"][0]
+        print(f"Tracker URL: {tracker_url}")
+        print(f"Info Hash: {info_hash}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
