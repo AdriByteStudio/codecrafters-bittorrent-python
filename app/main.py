@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import socket
 import sys
 from urllib.parse import quote_from_bytes
 
@@ -138,6 +139,35 @@ def main():
             ip = ".".join(str(b) for b in peers[i:i+4])
             port = int.from_bytes(peers[i+4:i+6], "big")
             print(f"{ip}:{port}")
+    elif command == "handshake":
+        with open(sys.argv[2], "rb") as f:
+            torrent_data = f.read()
+
+        decoded = decode_bencode(torrent_data)
+        info_hash = hashlib.sha1(bencode(decoded[b'info'])).digest()
+
+        host, port = sys.argv[3].rsplit(":", 1)
+        port = int(port)
+
+        handshake = (
+            b"\x13"  # length of protocol string (19)
+            + b"BitTorrent protocol"
+            + b"\x00" * 8  # reserved bytes
+            + info_hash
+            + os.urandom(20)  # peer id
+        )
+
+        with socket.create_connection((host, port), timeout=10) as sock:
+            sock.sendall(handshake)
+            response = b""
+            while len(response) < 68:
+                chunk = sock.recv(68 - len(response))
+                if not chunk:
+                    break
+                response += chunk
+
+        received_peer_id = response[48:68]
+        print(f"Peer ID: {received_peer_id.hex()}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
