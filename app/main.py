@@ -292,6 +292,105 @@ def magnet_info_with_peer(host, port, info_hash):
     return metadata
 
 
+def magnet_download_piece_from_peer(host, port, info_hash, piece_index):
+    BLOCK_SIZE = 16 * 1024
+    reserved = b"\x00\x00\x00\x00\x00\x10\x00\x00"
+    handshake = (
+        b"\x13" + b"BitTorrent protocol" + reserved
+        + info_hash + os.urandom(20)
+    )
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.sendall(handshake)
+        recv_exact(sock, 68)  # handshake response
+
+        # Wait for bitfield message (id 5)
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, _ = msg
+            if msg_id == 5:
+                break
+
+        # Send extension handshake (ut_metadata id 1)
+        send_extension_handshake(sock, 1)
+
+        # Wait for extension handshake response (id 20, ext id 0)
+        metadata_extension_id = None
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, payload = msg
+            if msg_id == 20 and payload[0] == 0:
+                ext_dict, _ = _decode_bencode(payload, 1)
+                metadata_extension_id = ext_dict[b"m"][b"ut_metadata"]
+                break
+
+        # Send metadata request message (msg_type 0, piece 0)
+        send_metadata_request(sock, metadata_extension_id, 0)
+
+        # Wait for the metadata data message (id 20, ext id = our ut_metadata id 1)
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, payload = msg
+            if msg_id == 20 and payload[0] == 1:
+                _, dict_end = _decode_bencode(payload, 1)
+                metadata = payload[dict_end:]
+                break
+
+        # Compute this piece's length from the metadata (last piece may be shorter)
+        info = decode_bencode(metadata)
+        length = info[b'length']
+        piece_length = info[b'piece length']
+        pieces = info[b'pieces']
+        num_pieces = len(pieces) // 20
+        if piece_index == num_pieces - 1:
+            piece_length = length - piece_index * piece_length
+
+        # Send interested message (id 2)
+        sock.sendall(b"\x00\x00\x00\x01\x02")
+
+        # Wait for unchoke message (id 1)
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, _ = msg
+            if msg_id == 1:
+                break
+
+        # Send request messages (id 6) for all blocks (pipelined)
+        num_blocks = (piece_length + BLOCK_SIZE - 1) // BLOCK_SIZE
+        for block_index in range(num_blocks):
+            begin = block_index * BLOCK_SIZE
+            block_len = min(BLOCK_SIZE, piece_length - begin)
+            request = (
+                b"\x00\x00\x00\x0d"  # message length = 13
+                + b"\x06"  # request id
+                + piece_index.to_bytes(4, "big")
+                + begin.to_bytes(4, "big")
+                + block_len.to_bytes(4, "big")
+            )
+            sock.sendall(request)
+
+        # Read piece messages (id 7) until all blocks received
+        blocks = {}
+        while len(blocks) < num_blocks:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, payload = msg
+            if msg_id == 7:
+                begin = int.from_bytes(payload[4:8], "big")
+                blocks[begin] = payload[8:]
+
+    return b"".join(blocks[begin] for begin in sorted(blocks)), metadata
+
+
 def main():
     command = sys.argv[1]
 
@@ -449,6 +548,46 @@ def main():
         pieces = info[b'pieces']
         for i in range(0, len(pieces), 20):
             print(pieces[i:i+20].hex())
+    elif command == "magnet_download_piece":
+        output_path = sys.argv[3]
+        magnet_link = sys.argv[4]
+        piece_index = int(sys.argv[5])
+
+        params = parse_qs(urlparse(magnet_link).query)
+        info_hash = bytes.fromhex(params["xt"][0].split(":")[-1])
+        tracker_url = params["tr"][0]
+
+        # Tracker GET request (left is unknown for magnet links, use placeholder)
+        url = (
+            f"{tracker_url}?info_hash={quote_from_bytes(info_hash, safe='')}"
+            f"&peer_id={quote_from_bytes(os.urandom(20), safe='')}"
+            f"&port=6881&uploaded=0&downloaded=0&left=1&compact=1"
+        )
+        response = requests.get(url)
+        response.raise_for_status()
+        tracker_response = decode_bencode(response.content)
+        peers = tracker_response[b'peers']
+
+        # Try each peer until one succeeds
+        piece_data = None
+        for i in range(0, len(peers), 6):
+            host = ".".join(str(b) for b in peers[i:i+4])
+            port = int.from_bytes(peers[i+4:i+6], "big")
+            try:
+                piece_data, metadata = magnet_download_piece_from_peer(
+                    host, port, info_hash, piece_index
+                )
+                break
+            except Exception:
+                continue
+
+        if piece_data is None:
+            raise RuntimeError("Failed to download piece from all peers")
+
+        with open(output_path, "wb") as f:
+            f.write(piece_data)
+
+        print(f"Piece {piece_index} downloaded to {output_path}")
     elif command == "download_piece":
         output_path = sys.argv[3]
         torrent_file = sys.argv[4]
