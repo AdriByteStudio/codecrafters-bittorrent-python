@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 
@@ -52,6 +53,22 @@ def _decode_bencode(data, index):
         raise NotImplementedError("Only strings, integers, lists, and dictionaries are supported at the moment")
 
 
+def bencode(value):
+    if isinstance(value, bytes):
+        return str(len(value)).encode() + b":" + value
+    elif isinstance(value, int):
+        return b"i" + str(value).encode() + b"e"
+    elif isinstance(value, list):
+        return b"l" + b"".join(bencode(item) for item in value) + b"e"
+    elif isinstance(value, dict):
+        result = b"d"
+        for key, val in value.items():
+            result += bencode(key) + bencode(val)
+        return result + b"e"
+    else:
+        raise TypeError(f"Type not serializable: {type(value)}")
+
+
 def main():
     command = sys.argv[1]
 
@@ -87,6 +104,8 @@ def main():
         decoded = decode_bencode(torrent_data)
         print(f"Tracker URL: {decoded[b'announce'].decode()}")
         print(f"Length: {decoded[b'info'][b'length']}")
+        info_hash = hashlib.sha1(bencode(decoded[b'info'])).hexdigest()
+        print(f"Info Hash: {info_hash}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
