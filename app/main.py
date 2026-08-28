@@ -225,6 +225,59 @@ def magnet_handshake_with_peer(host, port, info_hash):
     return received_peer_id, metadata_extension_id
 
 
+def send_metadata_request(sock, metadata_extension_id, piece=0):
+    # Metadata request message: extension message id (peer's ut_metadata id)
+    # + bencoded dict {'msg_type': 0, 'piece': 0}
+    payload = bytes([metadata_extension_id]) + bencode({
+        b"msg_type": 0,
+        b"piece": piece,
+    })
+    # Length prefix must include the message id byte (0x14)
+    message = (len(payload) + 1).to_bytes(4, "big") + b"\x14" + payload  # id 20
+    sock.sendall(message)
+
+
+def magnet_info_with_peer(host, port, info_hash):
+    reserved = b"\x00\x00\x00\x00\x00\x10\x00\x00"
+    handshake = (
+        b"\x13" + b"BitTorrent protocol" + reserved
+        + info_hash + os.urandom(20)
+    )
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.sendall(handshake)
+        response = recv_exact(sock, 68)
+
+        # Wait for bitfield message (id 5)
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, _ = msg
+            if msg_id == 5:
+                break
+
+        # Send extension handshake (ut_metadata id 1)
+        send_extension_handshake(sock, 1)
+
+        # Wait for extension handshake response (id 20, ext id 0)
+        metadata_extension_id = None
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, payload = msg
+            if msg_id == 20 and payload[0] == 0:
+                ext_dict, _ = _decode_bencode(payload, 1)
+                metadata_extension_id = ext_dict[b"m"][b"ut_metadata"]
+                break
+
+        # Send metadata request message (msg_type 0, piece 0)
+        send_metadata_request(sock, metadata_extension_id, 0)
+
+    return metadata_extension_id
+
+
 def main():
     command = sys.argv[1]
 
@@ -341,6 +394,32 @@ def main():
         print(f"Peer ID: {received_peer_id.hex()}")
         if metadata_extension_id is not None:
             print(f"Peer Metadata Extension ID: {metadata_extension_id}")
+    elif command == "magnet_info":
+        magnet_link = sys.argv[2]
+        params = parse_qs(urlparse(magnet_link).query)
+        info_hash = bytes.fromhex(params["xt"][0].split(":")[-1])
+        tracker_url = params["tr"][0]
+
+        # Tracker GET request (left is unknown for magnet links, use placeholder)
+        url = (
+            f"{tracker_url}?info_hash={quote_from_bytes(info_hash, safe='')}"
+            f"&peer_id={quote_from_bytes(os.urandom(20), safe='')}"
+            f"&port=6881&uploaded=0&downloaded=0&left=1&compact=1"
+        )
+        response = requests.get(url)
+        response.raise_for_status()
+        tracker_response = decode_bencode(response.content)
+        peers = tracker_response[b'peers']
+
+        # Connect to a peer, handshake, and send the metadata request
+        for i in range(0, len(peers), 6):
+            host = ".".join(str(b) for b in peers[i:i+4])
+            port = int.from_bytes(peers[i+4:i+6], "big")
+            try:
+                magnet_info_with_peer(host, port, info_hash)
+                break
+            except Exception:
+                continue
     elif command == "download_piece":
         output_path = sys.argv[3]
         torrent_file = sys.argv[4]
