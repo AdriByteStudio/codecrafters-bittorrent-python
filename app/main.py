@@ -1,6 +1,10 @@
 import hashlib
 import json
+import os
 import sys
+from urllib.parse import quote_from_bytes
+
+import requests
 
 # import bencodepy - available if you need it!
 # import requests - available if you need it!
@@ -111,6 +115,29 @@ def main():
         pieces = decoded[b'info'][b'pieces']
         for i in range(0, len(pieces), 20):
             print(pieces[i:i+20].hex())
+    elif command == "peers":
+        with open(sys.argv[2], "rb") as f:
+            torrent_data = f.read()
+
+        decoded = decode_bencode(torrent_data)
+        tracker_url = decoded[b'announce'].decode()
+        info_hash = hashlib.sha1(bencode(decoded[b'info'])).digest()
+        length = decoded[b'info'][b'length']
+
+        url = (
+            f"{tracker_url}?info_hash={quote_from_bytes(info_hash, safe='')}"
+            f"&peer_id={quote_from_bytes(os.urandom(20), safe='')}"
+            f"&port=6881&uploaded=0&downloaded=0&left={length}&compact=1"
+        )
+        response = requests.get(url)
+        response.raise_for_status()
+
+        tracker_response = decode_bencode(response.content)
+        peers = tracker_response[b'peers']
+        for i in range(0, len(peers), 6):
+            ip = ".".join(str(b) for b in peers[i:i+4])
+            port = int.from_bytes(peers[i+4:i+6], "big")
+            print(f"{ip}:{port}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
