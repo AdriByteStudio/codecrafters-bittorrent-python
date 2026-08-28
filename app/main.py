@@ -189,6 +189,7 @@ def magnet_handshake_with_peer(host, port, info_hash):
         + info_hash + os.urandom(20)
     )
 
+    metadata_extension_id = None
     with socket.create_connection((host, port), timeout=10) as sock:
         sock.sendall(handshake)
         response = recv_exact(sock, 68)
@@ -215,9 +216,13 @@ def magnet_handshake_with_peer(host, port, info_hash):
                     continue
                 msg_id, payload = msg
                 if msg_id == 20 and payload[0] == 0:
+                    # payload[0] is the extension message id (0 = handshake),
+                    # payload[1:] is the bencoded dict
+                    ext_dict, _ = _decode_bencode(payload, 1)
+                    metadata_extension_id = ext_dict[b"m"][b"ut_metadata"]
                     break
 
-    return received_peer_id
+    return received_peer_id, metadata_extension_id
 
 
 def main():
@@ -320,11 +325,12 @@ def main():
         reserved = b"\x00\x00\x00\x00\x00\x10\x00\x00"
 
         received_peer_id = None
+        metadata_extension_id = None
         for i in range(0, len(peers), 6):
             host = ".".join(str(b) for b in peers[i:i+4])
             port = int.from_bytes(peers[i+4:i+6], "big")
             try:
-                received_peer_id = magnet_handshake_with_peer(host, port, info_hash)
+                received_peer_id, metadata_extension_id = magnet_handshake_with_peer(host, port, info_hash)
                 break
             except Exception:
                 continue
@@ -333,6 +339,8 @@ def main():
             raise RuntimeError("Failed to handshake with any peer")
 
         print(f"Peer ID: {received_peer_id.hex()}")
+        if metadata_extension_id is not None:
+            print(f"Peer Metadata Extension ID: {metadata_extension_id}")
     elif command == "download_piece":
         output_path = sys.argv[3]
         torrent_file = sys.argv[4]
