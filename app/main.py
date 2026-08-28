@@ -275,7 +275,21 @@ def magnet_info_with_peer(host, port, info_hash):
         # Send metadata request message (msg_type 0, piece 0)
         send_metadata_request(sock, metadata_extension_id, 0)
 
-    return metadata_extension_id
+        # Wait for the metadata data message (id 20, ext id = our ut_metadata id 1)
+        while True:
+            msg = recv_message(sock)
+            if msg is None:
+                continue
+            msg_id, payload = msg
+            if msg_id == 20 and payload[0] == 1:
+                # payload[0] is the extension message id (1 = data),
+                # payload[1:] is bencoded dict + metadata piece contents
+                # Parse the bencoded dict to find where the metadata starts
+                _, dict_end = _decode_bencode(payload, 1)
+                metadata = payload[dict_end:]
+                break
+
+    return metadata
 
 
 def main():
@@ -411,15 +425,30 @@ def main():
         tracker_response = decode_bencode(response.content)
         peers = tracker_response[b'peers']
 
-        # Connect to a peer, handshake, and send the metadata request
+        # Connect to a peer, handshake, send metadata request, and receive metadata
+        metadata = None
         for i in range(0, len(peers), 6):
             host = ".".join(str(b) for b in peers[i:i+4])
             port = int.from_bytes(peers[i+4:i+6], "big")
             try:
-                magnet_info_with_peer(host, port, info_hash)
+                metadata = magnet_info_with_peer(host, port, info_hash)
                 break
             except Exception:
                 continue
+
+        if metadata is None:
+            raise RuntimeError("Failed to receive metadata from any peer")
+
+        # Decode the metadata (info dictionary) and print the torrent info
+        info = decode_bencode(metadata)
+        print(f"Tracker URL: {tracker_url}")
+        print(f"Length: {info[b'length']}")
+        print(f"Info Hash: {info_hash.hex()}")
+        print(f"Piece Length: {info[b'piece length']}")
+        print("Piece Hashes:")
+        pieces = info[b'pieces']
+        for i in range(0, len(pieces), 20):
+            print(pieces[i:i+20].hex())
     elif command == "download_piece":
         output_path = sys.argv[3]
         torrent_file = sys.argv[4]
