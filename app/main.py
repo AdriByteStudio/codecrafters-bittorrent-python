@@ -106,6 +106,11 @@ def main():
         print(f"Length: {decoded[b'info'][b'length']}")
         info_hash = hashlib.sha1(bencode(decoded[b'info'])).hexdigest()
         print(f"Info Hash: {info_hash}")
+        print(f"Piece Length: {decoded[b'info'][b'piece length']}")
+        print("Piece Hashes:")
+        pieces = decoded[b'info'][b'pieces']
+        for i in range(0, len(pieces), 20):
+            print(pieces[i:i+20].hex())
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
