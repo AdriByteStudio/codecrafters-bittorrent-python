@@ -177,7 +177,8 @@ def send_extension_handshake(sock, ut_metadata_id):
     payload = b"\x00" + bencode({
         b"m": {b"ut_metadata": ut_metadata_id},
     })
-    message = len(payload).to_bytes(4, "big") + b"\x14" + payload  # id 20
+    # Length prefix must include the message id byte (0x14)
+    message = (len(payload) + 1).to_bytes(4, "big") + b"\x14" + payload  # id 20
     sock.sendall(message)
 
 
