@@ -309,6 +309,72 @@ def main():
             f.write(piece_data)
 
         print(f"Piece {piece_index} downloaded to {output_path}")
+    elif command == "download":
+        output_path = sys.argv[3]
+        torrent_file = sys.argv[4]
+
+        with open(torrent_file, "rb") as f:
+            torrent_data = f.read()
+
+        decoded = decode_bencode(torrent_data)
+        info = decoded[b'info']
+        info_hash = hashlib.sha1(bencode(info)).digest()
+        tracker_url = decoded[b'announce'].decode()
+        length = info[b'length']
+        piece_length = info[b'piece length']
+        pieces = info[b'pieces']
+
+        # Get peers from the tracker
+        url = (
+            f"{tracker_url}?info_hash={quote_from_bytes(info_hash, safe='')}"
+            f"&peer_id={quote_from_bytes(os.urandom(20), safe='')}"
+            f"&port=6881&uploaded=0&downloaded=0&left={length}&compact=1"
+        )
+        response = requests.get(url)
+        response.raise_for_status()
+        tracker_response = decode_bencode(response.content)
+        peers = tracker_response[b'peers']
+
+        peer_list = []
+        for i in range(0, len(peers), 6):
+            host = ".".join(str(b) for b in peers[i:i+4])
+            port = int.from_bytes(peers[i+4:i+6], "big")
+            peer_list.append((host, port))
+
+        num_pieces = len(pieces) // 20
+
+        file_data = b""
+        for piece_index in range(num_pieces):
+            if piece_index == num_pieces - 1:
+                this_piece_length = length - piece_index * piece_length
+            else:
+                this_piece_length = piece_length
+
+            # Try each peer until one succeeds
+            piece_data = None
+            for host, port in peer_list:
+                try:
+                    piece_data = download_piece_from_peer(
+                        host, port, info_hash, piece_index, this_piece_length
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if piece_data is None:
+                raise RuntimeError(f"Failed to download piece {piece_index}")
+
+            # Verify the piece hash
+            expected_hash = pieces[piece_index*20:(piece_index+1)*20]
+            if hashlib.sha1(piece_data).digest() != expected_hash:
+                raise ValueError(f"Piece {piece_index} hash mismatch")
+
+            file_data += piece_data
+
+        with open(output_path, "wb") as f:
+            f.write(file_data)
+
+        print(f"Downloaded {torrent_file} to {output_path}")
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
