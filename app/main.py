@@ -37,8 +37,19 @@ def _decode_bencode(data, index):
             value, index = _decode_bencode(data, index)
             result.append(value)
         return result, index + 1
+    elif data[index:index+1] == b"d":
+        # dictionary: d<key1><value1>...<keyN><valueN>e
+        index += 1
+        result = {}
+        while data[index:index+1] != b"e":
+            key, index = _decode_bencode(data, index)
+            if not isinstance(key, bytes):
+                raise ValueError("Dictionary keys must be strings")
+            value, index = _decode_bencode(data, index)
+            result[key] = value
+        return result, index + 1
     else:
-        raise NotImplementedError("Only strings, integers, and lists are supported at the moment")
+        raise NotImplementedError("Only strings, integers, lists, and dictionaries are supported at the moment")
 
 
 def main():
@@ -54,13 +65,21 @@ def main():
         # bytestrings since they might contain non utf-8 characters.
         #
         # Let's convert them to strings for printing to the console.
+        # This is recursive so dict keys (which json.dumps won't pass to
+        # `default`) and nested structures are handled too.
         def bytes_to_str(data):
             if isinstance(data, bytes):
                 return data.decode()
+            if isinstance(data, dict):
+                return {bytes_to_str(k): bytes_to_str(v) for k, v in data.items()}
+            if isinstance(data, list):
+                return [bytes_to_str(item) for item in data]
+            if isinstance(data, (int, float, bool)) or data is None:
+                return data
 
             raise TypeError(f"Type not serializable: {type(data)}")
 
-        print(json.dumps(decode_bencode(bencoded_value), default=bytes_to_str))
+        print(json.dumps(bytes_to_str(decode_bencode(bencoded_value))))
     else:
         raise NotImplementedError(f"Unknown command {command}")
 
